@@ -34,9 +34,16 @@ NETWORK_RADIUS_M = WALK_SPEED_KMH * 1000 / 60 * WALK_MINUTES   # ~560 m along st
 STRAIGHT_RADIUS_M = 500     # straight-line approximation (streets are never straight)
 N_NEW_SITES = 5
 USE_NETWORK = True          # set False for a fast straight-line-only run
+SHOW_WATER = True           # set False to skip the water layer on the map (one extra OSM download)
 
 ox.settings.use_cache = True
-ox.settings.log_console = False
+ox.settings.log_console = True   # shows OSM download progress, so a slow download doesn't look like a freeze
+
+def flat_index(gdf):
+    """OSMnx 1.x indexes features by (element_type, osmid); 2.x by (element, id).
+    Flatten either into a plain 'osmid' column."""
+    gdf = gdf.reset_index()
+    return gdf.rename(columns={"id": "osmid", "element": "element_type"})
 
 # %% 1. Borough boundary
 borough = ox.geocode_to_gdf(BOROUGH).to_crs(CRS)
@@ -59,7 +66,7 @@ def is_inpost(row):
     return row.get("brand:wikidata") == "Q3182097"   # InPost's Wikidata ID
 
 lockers = raw[raw.apply(is_inpost, axis=1)].copy()
-lockers = lockers.reset_index()[["osmid", "geometry"] +
+lockers = flat_index(lockers)[["osmid", "geometry"] +
                                 [c for c in ("name", "ref", "addr:street", "addr:postcode") if c in lockers.columns]]
 lockers["in_borough"] = lockers.within(borough_poly)
 print(f"Parcel lockers in OSM (any brand): {len(raw)}")
@@ -79,18 +86,87 @@ val_sheet = pd.DataFrame({
 })
 val_sheet.sample(min(20, len(val_sheet)), random_state=1).to_csv(OUT / "validation_sample.csv", index=False)
 
+# %% 2b. Hand-collected lockers from InPost's own locker finder (replaces OSM if present)
+# data/inpost_lockers_manual.csv columns: name, address, postcode, type (locker/shop), lat, lon
+# lat/lon are optional; rows without them are placed at their postcode via postcodes.io
+# (free, open ONS-based geocoder; a postcode is ~15 addresses, so typically within ~100 m).
+MANUAL = DATA / "inpost_lockers_manual.csv"
+osm_lockers = lockers.copy()
+data_source = "OpenStreetMap"
+osm_match_rate = None
+all_points = None
+if MANUAL.exists():
+    import requests
+    man = pd.read_csv(MANUAL, dtype=str).fillna("")
+    man["postcode"] = man["postcode"].str.upper().str.replace(r"\s+", " ", regex=True).str.strip()
+    need = man.loc[(man["lat"] == "") | (man["lon"] == ""), "postcode"].unique().tolist()
+    lookup = {}
+    for i in range(0, len(need), 100):   # bulk endpoint takes up to 100 postcodes
+        r = requests.post("https://api.postcodes.io/postcodes", json={"postcodes": need[i:i + 100]}, timeout=30)
+        r.raise_for_status()
+        for item in r.json()["result"]:
+            if item["result"]:
+                lookup[item["query"]] = (item["result"]["latitude"], item["result"]["longitude"])
+    bad = [pc for pc in need if pc not in lookup]
+    if bad:
+        print(f"WARNING: {len(bad)} postcodes not found, rows skipped: {bad}")
+    for idx, row in man.iterrows():
+        if (row["lat"] == "" or row["lon"] == "") and row["postcode"] in lookup:
+            man.at[idx, "lat"], man.at[idx, "lon"] = lookup[row["postcode"]]
+    man = man[(man["lat"] != "") & (man["lon"] != "")]
+    if "type" not in man.columns:
+        man["type"] = "locker"
+    man["type"] = man["type"].str.lower().str.strip().replace("", "locker")
+    lockers = gpd.GeoDataFrame(
+        man[["name", "address", "postcode", "type"]].reset_index(drop=True),
+        geometry=gpd.points_from_xy(man["lon"].astype(float), man["lat"].astype(float)),
+        crs=4326).to_crs(CRS)
+    lockers["osmid"] = range(len(lockers))   # placeholder id so later code works unchanged
+    lockers["in_borough"] = lockers.within(borough_poly)
+    # Points beyond the walking network's edge would snap to its boundary and look closer than they are
+    reach_poly = search_area.iloc[0]
+    far = ~lockers.within(reach_poly)
+    if far.any():
+        print(f"Dropped {far.sum()} points too far outside the borough to affect coverage: "
+              f"{lockers.loc[far, 'name'].tolist()}")
+        lockers = lockers[~far].reset_index(drop=True)
+    all_points = lockers.copy()                      # lockers + shops, for InPost's own headline measure
+    lockers = lockers[lockers["type"] == "locker"].reset_index(drop=True)
+    shops = all_points[all_points["type"] != "locker"]
+    print(f"Hand-collected: {len(lockers)} lockers, {len(shops)} shop points")
+    data_source = "InPost locker finder (hand-collected)"
+    # How complete is OSM? Share of real lockers with an OSM InPost locker within 100 m
+    if len(osm_lockers):
+        d = lockers.geometry.apply(lambda p: osm_lockers.distance(p).min())
+        osm_match_rate = float((d <= 100).mean())
+    else:
+        osm_match_rate = 0.0
+    print(f"Using {len(lockers)} hand-collected lockers ({lockers['in_borough'].sum()} inside the borough)")
+    print(f"OSM completeness: {osm_match_rate:.0%} of these have an OSM InPost locker within 100 m")
+
 # %% 3. Population by Output Area (Census 2021)
 def load_population(path):
-    df = pd.read_csv(path)
-    code_col = next(c for c in df.columns if df[c].astype(str).str.match(r"^E00\d{6}$").all())
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c != code_col]
-    pop_col = next((c for c in num_cols if "total" in c.lower()), num_cols[-1])
-    print(f"Population columns used: code='{code_col}', population='{pop_col}'")
-    return df[[code_col, pop_col]].rename(columns={code_col: "OA21CD", pop_col: "population"})
+    """Works with both Nomis bulk files and Nomis query downloads, which add
+    title rows and footnotes around the table. Keeps only rows with an OA code."""
+    import csv
+    oa_code = re.compile(r"E00\d{6}")
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        rows = [r for r in csv.reader(f) if any(oa_code.fullmatch(x.strip()) for x in r)]
+    df = pd.DataFrame(rows)
+    code_col = max(df.columns, key=lambda c: df[c].str.strip().str.fullmatch(r"E00\d{6}").sum())
+    num = df.drop(columns=[code_col]).apply(
+        lambda s: pd.to_numeric(s.str.replace(",", "").str.strip(), errors="coerce"))
+    num = num.loc[:, num.notna().all() & (num.nunique() > 1)]   # drops text and constant 'date' columns
+    pop_col = num.sum().idxmax()   # 'Total' is always the largest of total / household / communal
+    out = pd.DataFrame({"OA21CD": df[code_col].str.strip(), "population": num[pop_col]})
+    print(f"Population rows loaded: {len(out)}, residents: {out['population'].sum():,.0f}")
+    return out
 
 pop = load_population(DATA / "census2021-ts001-oa.csv")
 
-oa_file = next(DATA.glob("oa_boundaries.*"))
+oa_file = next(p for ext in (".geojson", ".gpkg", ".shp", ".zip")
+               for p in DATA.glob(f"oa_boundaries*{ext}"))
+print(f"Boundary file: {oa_file.name}")
 oas = gpd.read_file(oa_file, mask=borough.to_crs(gpd.read_file(oa_file, rows=1).crs))
 oas = oas.to_crs(CRS)
 code_col = next(c for c in oas.columns if c.upper().startswith("OA21CD"))
@@ -125,7 +201,15 @@ if USE_NETWORK:
     oas["covered"] = oas["dist_walk_m"] <= NETWORK_RADIUS_M
     cov_walk = oas.loc[oas["covered"], "population"].sum() / total_pop
     print(f"Walking coverage (≤{WALK_MINUTES} min ≈ {NETWORK_RADIUS_M:.0f} m): {cov_walk:.1%}")
+    cov_walk_all = None
+    if all_points is not None and len(all_points) > len(lockers):
+        nodes_all = ox.distance.nearest_nodes(G, all_points.geometry.x, all_points.geometry.y)
+        dist_all = nx.multi_source_dijkstra_path_length(G, set(nodes_all), weight="length")
+        covered_all = oas["node"].map(dist_all).fillna(np.inf) <= NETWORK_RADIUS_M
+        cov_walk_all = oas.loc[covered_all, "population"].sum() / total_pop
+        print(f"Walking coverage incl. shop points (comparable to InPost's 7-minute measure): {cov_walk_all:.1%}")
 else:
+    cov_walk_all = None
     oas["covered"] = oas["covered_straight"]
     cov_walk = None
 
@@ -137,7 +221,7 @@ cand_tags = {
 }
 cands = ox.features_from_polygon(borough.to_crs(4326).iloc[0].geometry, tags=cand_tags).to_crs(CRS)
 cands["geometry"] = cands.geometry.representative_point()
-cands = cands.reset_index()
+cands = flat_index(cands)
 def site_type(r):
     if r.get("railway") == "station":
         return "station"
@@ -199,44 +283,69 @@ gap_check = pd.DataFrame({
 gap_check.to_csv(OUT / "gap_check.csv", index=False)
 
 # %% 8. Map
+# Context layers are drawn from OpenStreetMap data already downloaded, rather than map tiles:
+# no API keys, no tile-server usage limits, and a cleaner look.
+water_tags = {"natural": "water", "waterway": ["dock", "riverbank", "canal"], "water": True}
+water = None
+if SHOW_WATER:
+    try:
+        print("Downloading water layer for the map (can take a few minutes the first time)...")
+        water = ox.features_from_polygon(search_poly_wgs, tags=water_tags).to_crs(CRS)
+        water = water[water.geom_type.isin(["Polygon", "MultiPolygon"])]
+    except Exception as e:
+        print(f"Water layer skipped: {e}")
+        water = None
+
 fig, ax = plt.subplots(figsize=(9, 9))
 oas[oas["covered"]].plot(ax=ax, color="#c9d7ea", edgecolor="white", linewidth=0.2)
 oas[~oas["covered"] & ~oas["newly_covered"]].plot(ax=ax, color="#e8a39c", edgecolor="white", linewidth=0.2)
 oas[oas["newly_covered"]].plot(ax=ax, color="#f3d27a", edgecolor="white", linewidth=0.2)
-borough.boundary.plot(ax=ax, color="#1f497d", linewidth=1.2)
-lockers[lockers["in_borough"]].plot(ax=ax, color="#1f497d", markersize=8, label="InPost locker (OSM)")
+if USE_NETWORK:
+    streets = ox.graph_to_gdfs(G, nodes=False)
+    streets.clip(borough_poly.buffer(50)).plot(ax=ax, color="#555555", linewidth=0.25, alpha=0.35)
+if water is not None and len(water):
+    water.clip(borough_poly.buffer(300)).plot(ax=ax, color="#9ec5e0", edgecolor="none", zorder=2)
+borough.boundary.plot(ax=ax, color="#1f497d", linewidth=1.2, zorder=3)
+if all_points is not None and len(all_points) > len(lockers):
+    shop_pts = all_points[(all_points["type"] != "locker") & all_points["in_borough"]]
+    shop_pts.plot(ax=ax, facecolor="none", edgecolor="#1f497d", marker="o", markersize=12,
+                  linewidth=0.7, zorder=4, label="InPost shop")
+locker_label = "InPost locker" if MANUAL.exists() else "InPost locker (OSM)"
+lockers[lockers["in_borough"]].plot(ax=ax, color="#1f497d", markersize=14, zorder=4, label=locker_label)
 if len(new_sites):
     new_sites.plot(ax=ax, color="#d35400", marker="*", markersize=260, edgecolor="black",
                    linewidth=0.6, zorder=5, label="Proposed site")
     for _, r in new_sites.iterrows():
         ax.annotate(str(r["rank"]), (r.geometry.x, r.geometry.y), xytext=(6, 6),
-                    textcoords="offset points", fontsize=10, fontweight="bold")
-try:
-    import contextily as cx
-    cx.add_basemap(ax, crs=CRS, source=cx.providers.CartoDB.PositronNoLabels, alpha=0.6)
-except Exception:
-    pass
+                    textcoords="offset points", fontsize=10, fontweight="bold", zorder=6)
 from matplotlib.patches import Patch
 handles, _ = ax.get_legend_handles_labels()
-handles += [Patch(color="#c9d7ea", label="Within 7-min walk"),
+handles += [Patch(color="#c9d7ea", label="Within 7-min walk of a locker"),
             Patch(color="#e8a39c", label="Gap"),
             Patch(color="#f3d27a", label="Covered by proposed sites")]
 ax.legend(handles=handles, loc="lower left", fontsize=8, frameon=True)
 ax.set_axis_off()
 ax.set_title("InPost locker coverage, Tower Hamlets", fontsize=13, color="#1f497d", loc="left")
+ax.annotate("Streets and water © OpenStreetMap contributors. Population: ONS Census 2021.",
+            xy=(1, 0), xycoords="axes fraction", ha="right", va="bottom", fontsize=6, color="#666666")
 plt.tight_layout()
 plt.savefig(OUT / "coverage_map.png", dpi=250)
-plt.show()
+plt.close(fig)   # saved to file; plt.show() would pause the script until the window is closed
 
-# %% 9. Results summary (send this file plus the PNG and CSVs back to Claude)
+# %% 9. Results summary 
 results = {
     "borough": "Tower Hamlets",
+    "locker_data_source": data_source,
+    "osm_inpost_lockers_found": int(len(osm_lockers)),
+    "osm_completeness_vs_inpost": round(osm_match_rate, 4) if osm_match_rate is not None else None,
     "residents": int(total_pop),
     "output_areas": int(len(oas)),
-    "inpost_lockers_osm_total": int(len(lockers)),
-    "inpost_lockers_osm_in_borough": int(lockers["in_borough"].sum()),
+    "lockers_used_total": int(len(lockers)),
+    "lockers_used_in_borough": int(lockers["in_borough"].sum()),
     "coverage_straight_line": round(cov_straight, 4),
     "coverage_walking": round(cov_walk, 4) if cov_walk is not None else None,
+    "coverage_walking_incl_shops": round(cov_walk_all, 4) if cov_walk_all is not None else None,
+    "shop_points": int(len(all_points) - len(lockers)) if all_points is not None else None,
     "walk_radius_m": round(NETWORK_RADIUS_M),
     "uncovered_residents": int(oas.loc[~oas["covered"], "population"].sum()),
     "proposed_sites": new_sites.drop(columns="geometry").to_dict(orient="records"),
