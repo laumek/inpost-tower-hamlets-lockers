@@ -1,0 +1,8 @@
+data/
+cache/
+outputs/*
+!outputs/coverage_map.png
+!outputs/results.json
+.venv/
+__pycache__/
+.ipynb_checkpoints/
