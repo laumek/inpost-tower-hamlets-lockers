@@ -6,11 +6,14 @@ I live in Limehouse, and my nearest InPost locker is about a 20-minute walk away
 
 ![Coverage map](outputs/coverage_map.png)
 
+
 ## Findings
 
 - **40.6%** of residents are within a 7-minute walk of a locker (**57.4%** including InPost shops).
 - **Five new lockers** would reach **52,000 more residents**, matching today's lockers-plus-shops coverage, but 24/7.
 - **OpenStreetMap had only 24% of InPost's real lockers**, so I rebuilt the dataset by hand from InPost's locker finder.
+
+**[Read the two-page report](report/InPost_Tower_Hamlets_Locker_Analysis.pdf)**
 
 ## Method
 
