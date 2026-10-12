@@ -1,0 +1,60 @@
+{
+  "borough": "Tower Hamlets",
+  "locker_data_source": "InPost locker finder (hand-collected)",
+  "osm_inpost_lockers_found": 16,
+  "osm_completeness_vs_inpost": 0.2424,
+  "residents": 310303,
+  "output_areas": 913,
+  "lockers_used_total": 33,
+  "lockers_used_in_borough": 29,
+  "coverage_straight_line": 0.6365,
+  "coverage_walking": 0.4061,
+  "coverage_walking_incl_shops": 0.574,
+  "shop_points": 22,
+  "walk_radius_m": 560,
+  "uncovered_residents": 184304,
+  "proposed_sites": [
+    {
+      "rank": 1,
+      "site": "Nowrin Stores",
+      "type": "convenience",
+      "residents_added": 12005,
+      "coverage_after": 0.4447394965565915
+    },
+    {
+      "rank": 2,
+      "site": "Co-op Food - Isle of Dogs - Cassilis Road",
+      "type": "supermarket",
+      "residents_added": 11191,
+      "coverage_after": 0.4808042461722897
+    },
+    {
+      "rank": 3,
+      "site": "Ahmed's Convenience Store",
+      "type": "convenience",
+      "residents_added": 11031,
+      "coverage_after": 0.5163533707376339
+    },
+    {
+      "rank": 4,
+      "site": "Limehouse",
+      "type": "station",
+      "residents_added": 8952,
+      "coverage_after": 0.5452025923049406
+    },
+    {
+      "rank": 5,
+      "site": "FreshGo",
+      "type": "convenience",
+      "residents_added": 8873,
+      "coverage_after": 0.5737972240036351
+    }
+  ],
+  "coverage_after_new_sites": 0.5738,
+  "candidate_counts": {
+    "convenience": 289,
+    "station": 32,
+    "supermarket": 28,
+    "fuel station": 10
+  }
+}
