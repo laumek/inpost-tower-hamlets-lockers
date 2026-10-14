@@ -2,32 +2,29 @@
 
 I live in Limehouse, and my nearest InPost locker is about a 20-minute walk away. So I measured how many Tower Hamlets residents live within a 7-minute walk of a locker, and where five new lockers would help most.
 
-> Independent analysis using public data. Not affiliated with InPost.
+Short version: about 41% of residents are within 7 minutes of a locker, or 57% if you count InPost's shop drop-off points too. Five well-placed lockers would reach around 52,000 more people, which would match today's lockers-plus-shops coverage, but available 24/7.
 
-![Coverage map](outputs/coverage_map.png)
+[Two-page write-up](report/InPost_Tower_Hamlets_Locker_Analysis.pdf)
 
+![Map](outputs/coverage_map.png)
 
-## Findings
+This is an independent analysis using public data. It isn't affiliated with InPost.
 
-- **40.6%** of residents are within a 7-minute walk of a locker (**57.4%** including InPost shops).
-- **Five new lockers** would reach **52,000 more residents**, matching today's lockers-plus-shops coverage, but 24/7.
-- **OpenStreetMap had only 24% of InPost's real lockers**, so I rebuilt the dataset by hand from InPost's locker finder.
+## How it works
 
-**[Read the two-page report](report/InPost_Tower_Hamlets_Locker_Analysis.pdf)**
+Population comes from the 2021 Census for the borough's 913 Output Areas. Walking distances follow the actual street network rather than straight lines, which matters here: the canals, docks and the A12 turn a lot of short distances into long walks. New sites are picked one at a time from 359 candidates (supermarkets, convenience stores, fuel stations and rail stations), each time choosing the one that reaches the most people who aren't already covered.
 
-## Method
+The hardest part was the data. OpenStreetMap only had about a quarter of InPost's real lockers, so the results it gave were badly off. I rebuilt the locker list by hand from InPost's own locker finder, including lockers just over the borough boundary, since people near the edge use those too.
 
-Census 2021 population for 913 Output Areas, walking distances along the OpenStreetMap street network (7 min ≈ 560 m), and a greedy search over 359 candidate sites (shops, supermarkets, fuel and rail stations).
+A few things to bear in mind. Lockers are placed at the centre of their postcode, so locations are approximate. Population stands in for parcel demand, which isn't the same thing. And the candidate sites come from map data, not a survey, so nobody has checked whether they have space for a locker.
 
-**Limitations:** lockers are placed by postcode, residents stand in for parcel demand, and candidate sites weren't surveyed.
-
-## Run it
+## Running it
 
 ```bash
 pip install -r requirements.txt
 python tower_hamlets_lockers.py
 ```
 
-Add the Census 2021 TS001 Output Area file (Nomis) and OA 2021 boundaries (ONS) to `data/` first.
+You'll need two files in `data/`: the Census table TS001 for Tower Hamlets Output Areas (from Nomis, with area codes), and the 2021 Output Area boundaries from the ONS Open Geography Portal. The hand-collected locker list is already in `data/inpost_lockers_manual.csv`.
 
-Built with Python, GeoPandas, OSMnx and NetworkX · Data © OpenStreetMap contributors (ODbL), ONS (OGL v3)
+Data: ONS Census 2021 (OGL), OpenStreetMap contributors (ODbL), and InPost's public locker finder.
